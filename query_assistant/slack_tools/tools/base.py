@@ -502,7 +502,8 @@ def get_channel_messages(client, channel_id, oldest):
             if message_ts:
                 try:
                     message_datetime = datetime.fromtimestamp(float(message_ts))
-                    message_date = message_datetime.strftime("%Y-%m-%d")
+                    # Include day of week for better temporal context
+                    message_date = message_datetime.strftime("%Y-%m-%d (%A)")
                 except (ValueError, TypeError):
                     logger.warning(f"Could not parse timestamp: {{message_ts}}")
             
@@ -532,7 +533,8 @@ def get_channel_messages(client, channel_id, oldest):
                     if reply_ts:
                         try:
                             reply_datetime = datetime.fromtimestamp(float(reply_ts))
-                            reply_date = reply_datetime.strftime("%Y-%m-%d")
+                            # Include day of week for better temporal context
+                            reply_date = reply_datetime.strftime("%Y-%m-%d (%A)")
                         except (ValueError, TypeError):
                             logger.warning(f"Could not parse reply timestamp: {{reply_ts}}")
                     
@@ -668,17 +670,38 @@ def analyze_messages_with_llm(messages, query, channel_id):
         system_prompt = (
             "You are a specialized AI assistant for analyzing Slack messages related to time-off requests and availability. "
             "Your expertise includes:\\n\\n"
-            "1. **Date Intelligence**: You excel at interpreting relative dates (today, tomorrow, next week) based on message timestamps\\n"
-            "2. **Time-off Pattern Recognition**: You identify phrases like 'out', 'off', 'vacation', 'sick', 'PTO', 'WFH', date ranges, etc.\\n"
-            "3. **Context Synthesis**: You combine information from multiple messages and threads to provide comprehensive answers\\n"
-            "4. **Accurate Counting**: You provide precise counts when asked 'how many people' questions\\n\\n"
-            "**Critical Instructions:**\\n"
-            "- Always reference the TODAY'S DATE provided in the context\\n"
-            "- Pay attention to when messages were posted vs. the dates they reference\\n"
-            "- Look for both explicit dates (7/24-7/31) and relative dates (tomorrow, next week)\\n"
-            "- Consider ongoing time-off that spans multiple days\\n"
-            "- Include specific names and dates in your answers\\n"
-            "- Cite the most relevant message ID and include the exact link"
+            "1. **Advanced Date Intelligence**: You excel at interpreting ALL date formats and temporal references:\\n"
+            "   - Explicit dates: '7/24-7/31', '21-25', 'July 24th', 'Thursday-Friday'\\n"
+            "   - Relative dates: 'today', 'tomorrow', 'this week', 'next week', 'rest of the day'\\n"
+            "   - Day names: 'Thursday and Friday', 'Monday through Wednesday'\\n"
+            "   - Time periods: 'until 10am', 'from 2pm', 'for a while', 'all day'\\n"
+            "   - Duration spans: 'this week', 'next 3 days', 'through Friday'\\n\\n"
+            "2. **Comprehensive Time-off Pattern Recognition**: Identify ALL variations including:\\n"
+            "   - Direct: 'out', 'off', 'OOO', 'away', 'vacation', 'sick', 'PTO', 'personal day'\\n"
+            "   - Indirect: 'doctor appointment', 'not available', 'taking a day', 'will be away'\\n"
+            "   - Partial: 'WFH', 'remote', 'out for a while', 'leaving early', 'starting late'\\n"
+            "   - Medical: 'doctor', 'appointment', 'sick', 'medical', 'procedure'\\n"
+            "   - Personal: 'personal', 'family', 'emergency', 'bereavement'\\n\\n"
+            "3. **Context Synthesis**: You must analyze the RELATIONSHIP between message timing and referenced dates:\\n"
+            "   - Someone posting last week about 'this week' means THIS current week\\n"
+            "   - Someone posting Tuesday about 'Thursday and Friday' when today IS Thursday\\n"
+            "   - Someone posting '21-25' when today is the 24th (meaning they're out TODAY)\\n"
+            "   - Someone posting 'until 10am' yesterday when it's now past 10am today\\n\\n"
+            "4. **Critical Date Logic**: ALWAYS consider:\\n"
+            "   - When was the message posted vs. today's date\\n"
+            "   - What date range does the time-off message reference\\n"
+            "   - Is the referenced time-off period active TODAY\\n"
+            "   - Handle overlapping and ongoing time-off periods\\n\\n"
+            "5. **Accurate Counting**: Provide precise counts and specific names\\n\\n"
+            "**CRITICAL INSTRUCTIONS:**\\n"
+            "- ALWAYS reference TODAY'S DATE and calculate all dates relative to it\\n"
+            "- Look for BOTH recent messages and older messages that reference current dates\\n"
+            "- A message from 2 weeks ago saying 'I'll be out 14th-28th' is STILL RELEVANT if today falls in that range\\n"
+            "- Pay special attention to date ranges that span multiple days\\n"
+            "- Include ALL people who are out today, regardless of when they posted about it\\n"
+            "- For partial day absences, specify the time details (e.g., 'until 10am', 'doctor appointment')\\n"
+            "- Cite the most relevant message ID and include the exact link\\n"
+            "- When unsure about date calculations, err on the side of inclusion and explain your reasoning"
         )
         
         # Check if we need to chunk the messages
@@ -725,17 +748,33 @@ def analyze_messages_with_llm(messages, query, channel_id):
                     "Analyze the following Slack messages to answer the user's time-off query. "
                     "Focus on finding relevant information about people's availability, time-off requests, and absence patterns.\\n\\n"
                     f"**User Query:** {{query}}\\n\\n"
-                    "**Your Task:**\\n"
-                    "1. Identify all mentions of time-off, absences, or availability in this chunk\\n"
-                    "2. Pay special attention to dates and timing\\n"
-                    "3. Note any ongoing or future time-off periods\\n"
-                    "4. If you find relevant information, include the specific message ID and link\\n"
-                    "5. If this chunk doesn't contain relevant information, state that clearly\\n\\n"
+                    "**Your Task (Chunk Analysis):**\\n"
+                    "1. **Comprehensive Date Analysis**: For each message, determine:\\n"
+                    "   - When was this message posted (check 'DAYS AGO' indicator)\\n"
+                    "   - What dates does any time-off reference apply to\\n"
+                    "   - Calculate if those dates include TODAY based on the context date\\n"
+                    "   - Look for date ranges (21-25, 7/24-7/31) and day names (Thursday, Friday)\\n\\n"
+                    "2. **Exhaustive Pattern Search**: Look for ALL time-off patterns including:\\n"
+                    "   - Direct: out, off, OOO, vacation, sick, PTO, personal, away, not available\\n"
+                    "   - Medical: doctor, appointment, procedure, medical\\n"
+                    "   - Partial: WFH, remote, leaving early, starting late, 'for a while'\\n"
+                    "   - Time-specific: 'until 10am', 'rest of day', 'from 2pm'\\n\\n"
+                    "3. **Timeline Verification**: Pay special attention to:\\n"
+                    "   - Messages posted days/weeks ago that reference current dates\\n"
+                    "   - Relative dates that need calculation (this week, next week, tomorrow)\\n"
+                    "   - Ongoing time-off periods that span multiple days\\n\\n"
+                    "4. **Critical Examples**: Include if you find patterns like:\\n"
+                    "   - 'I'll be out 21-25' posted last week (when today is 24th)\\n"
+                    "   - 'Out Thursday-Friday' posted Tuesday (when today is Thursday)\\n"
+                    "   - 'Out until 10am' posted yesterday\\n"
+                    "   - 'Taking this week off' posted last Friday\\n\\n"
                     f"**Messages (Chunk {{i+1}} of {{len(chunks)}}):**\\n{{chunk}}\\n\\n"
                     "**Response Format:**\\n"
                     f"- Start with: 'CHUNK {{i+1}} ANALYSIS:'\\n"
-                    "- Provide your findings\\n"
-                    "- End with: 'RELEVANT MESSAGE LINK: [link]' (if applicable) or 'NO RELEVANT INFORMATION IN THIS CHUNK' (if not applicable)"
+                    "- List ALL people found to be out today with date calculations\\n"
+                    "- Include message IDs and specific time-off details\\n"
+                    "- Show your date reasoning (e.g., 'John posted 3 DAYS AGO about being out 23-25, today is 24th')\\n"
+                    "- End with: 'RELEVANT MESSAGE LINKS: [links]' or 'NO RELEVANT INFORMATION IN THIS CHUNK'"
                 )
                 
                 chunk_messages = [
@@ -775,14 +814,24 @@ def analyze_messages_with_llm(messages, query, channel_id):
                 synthesis_prompt += f"=== CHUNK {{i+1}} ===\\n{{result}}\\n\\n"
             
             synthesis_prompt += (
-                "**Your Final Task:**\\n"
-                "1. Combine all relevant findings from the chunks\\n"
-                "2. Provide a single, comprehensive answer to the user's query\\n"
-                "3. Include specific names and dates where applicable\\n"
-                "4. If multiple people are mentioned, organize the information clearly\\n"
-                "5. Include the most relevant message link(s)\\n"
-                "6. If no relevant information was found across all chunks, state that clearly\\n\\n"
-                "**Important:** Your response should be a direct answer to the user's query, not a summary of chunk analyses."
+                "**Your Final Synthesis Task:**\\n"
+                "1. **Combine All Findings**: Merge all people identified across chunks who are out today\\n"
+                "2. **Eliminate Duplicates**: If the same person appears in multiple chunks, consolidate their information\\n"
+                "3. **Verify Date Logic**: Double-check that all included people are actually out TODAY\\n"
+                "4. **Provide Complete Answer**: Include:\\n"
+                "   - Total count of people out today\\n"
+                "   - Each person's name and time-off details\\n"
+                "   - Date calculations where relevant\\n"
+                "   - Specific reasons if provided (doctor, sick, vacation, etc.)\\n"
+                "   - Time specifications (all day, until 10am, etc.)\\n\\n"
+                "5. **Include Evidence**: Reference the most relevant message links for verification\\n\\n"
+                "**Critical Requirements:**\\n"
+                "- Focus on TODAY'S date specifically\\n"
+                "- Don't miss anyone who posted advance notice that applies to today\\n"
+                "- Include partial day absences with time details\\n"
+                "- Show your reasoning for date calculations\\n"
+                "- Provide a clear, organized final answer\\n\\n"
+                "**Response Format:** Provide a direct answer to the user's query with complete details and verification links."
             )
             
             synthesis_messages = [
@@ -813,18 +862,38 @@ def analyze_messages_with_llm(messages, query, channel_id):
                 "Analyze the following Slack messages to answer the user's time-off query. "
                 "Pay close attention to dates, timing, and context.\\n\\n"
                 f"**User Query:** {{query}}\\n\\n"
-                "**Analysis Instructions:**\\n"
-                "1. **Date Accuracy**: Use the TODAY'S DATE from the context to interpret relative dates\\n"
-                "2. **Pattern Recognition**: Look for time-off indicators (out, off, vacation, sick, PTO, etc.)\\n"
-                "3. **Comprehensive Search**: Check both main messages and reply threads\\n"
-                "4. **Specific Details**: Include names, dates, and duration when answering\\n"
-                "5. **Message Citation**: Reference the most relevant message ID and include the exact link\\n\\n"
+                "**COMPREHENSIVE Analysis Instructions:**\\n"
+                "1. **Thorough Date Analysis**: Use TODAY'S DATE from context to interpret ALL date references:\\n"
+                "   - Calculate when relative dates (today, tomorrow, this week, next week) actually refer to\\n"
+                "   - Identify date ranges (21-25, 7/24-7/31) and check if today falls within them\\n"
+                "   - Handle day names (Thursday, Friday) by determining which specific dates they mean\\n"
+                "   - Consider time-specific references (until 10am, from 2pm, rest of day)\\n\\n"
+                "2. **Exhaustive Pattern Search**: Look for ALL time-off indicators, including but not limited to:\\n"
+                "   - Explicit: out, off, OOO, vacation, sick, PTO, personal day, away, not available\\n"
+                "   - Medical: doctor, appointment, procedure, medical, sick leave\\n"
+                "   - Partial: WFH, remote, leaving early, starting late, out for a while\\n"
+                "   - Indirect: taking a day, will be away, not in office, family emergency\\n\\n"
+                "3. **Timeline Correlation**: For EVERY message, determine:\\n"
+                "   - When was this message posted (check timestamp and 'DAYS AGO' indicator)\\n"
+                "   - What date(s) does the time-off reference apply to\\n"
+                "   - Is that time-off period active TODAY\\n"
+                "   - Account for ongoing multi-day absences\\n\\n"
+                "4. **Inclusion Priority**: When in doubt, INCLUDE rather than exclude:\\n"
+                "   - If someone posted 'I'll be out 21-25' and today is the 24th, they ARE out today\\n"
+                "   - If someone posted Tuesday 'I'll be out Thursday-Friday' and today is Thursday, they ARE out\\n"
+                "   - If someone posted yesterday 'out until 10am' consider current time context\\n\\n"
+                "5. **Verification Steps**: Before finalizing your answer:\\n"
+                "   - Double-check each person's time-off dates against today's date\\n"
+                "   - Ensure you haven't missed any date ranges or relative date calculations\\n"
+                "   - Look for follow-up messages that might modify or extend time-off\\n\\n"
                 f"**Messages to Analyze:**\\n{{messages_text}}\\n\\n"
                 "**Response Requirements:**\\n"
-                "- Provide a direct, comprehensive answer to the query\\n"
-                "- Include specific names and dates where applicable\\n"
-                "- End with: 'MESSAGE_LINK: [exact link from the most relevant message]'\\n"
-                "- If no relevant information is found, state that clearly and suggest what might help"
+                "- Provide a comprehensive answer that captures ALL relevant time-off\\n"
+                "- For each person, specify: name, reason (if given), and time details\\n"
+                "- Show your date calculations when relevant (e.g., 'posted on X about dates Y-Z')\\n"
+                "- Include specific message IDs and links for verification\\n"
+                "- If no relevant information found, explain what patterns you searched for\\n"
+                "- End with: 'MESSAGE_LINK: [exact link from the most relevant message]'"
             )
 
             litellm.request_timeout = 30
@@ -875,7 +944,8 @@ def execute_slack_action(token, action, operation, **kwargs):
     
     channel = kwargs.get('channel')
     query = kwargs.get('query')
-    oldest = kwargs.get('oldest', '24h')  # Default to last 24 hours
+    # Expand default search window to 60 days to match Terraform config and catch advance time-off requests
+    oldest = kwargs.get('oldest', '60d')  # Default to last 60 days to match the configured search window
     
     if not channel:
         return {{"success": False, "error": "Channel parameter is required"}}
